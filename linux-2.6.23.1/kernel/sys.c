@@ -2358,4 +2358,110 @@ int orderly_poweroff(bool force)
 }
 EXPORT_SYMBOL_GPL(orderly_poweroff);
 
+//CS 1550 CODE BELOW
+
+DEFINE_SPINLOCK(sem_lock);
+
+//according to lecture, needs a queue structure
+//implementing queue with a linked list
+//monitors both first and last nodes to asist in speed of enqueue/dequeue
+//definition of a node in the queue linked list
+struct sem_queue_node
+{
+	struct task_struct *task; //the task to be pushed into the sem queue
+	struct sem_queue_node *next; //the next node in the queue
+};
+
+//definition of semaphore inlucdes first and last nodes in the queue. Null in this case
+//helper methods for enqueue and dequeue will follow
+struct cs1550_sem
+{
+	int value;
+	struct sem_queue_node *first;
+	struct sem_queue_node *last;
+};
+
+//enqueue helper method
+void sem_enqueue(struct task_struct *t, struct cs1550_sem *sem)
+{
+	//creates a new node for the queue
+	//kmalloc'd usinig GFP_ATOMIC because we are holding a spinlock
+	struct sem_queue_node *new = (struct sem_queue_node*)kmalloc(sizeof(struct sem_queue_node), GFP_ATOMIC);
+	
+	//set the node's task to the current task
+	new->task = t;
+	new->next = NULL; 
+	//if the queue is empty, add the value, first/last will be the same
+	if(sem->first == NULL && sem->last == NULL)
+	{
+		sem->first = new;
+		sem->last = new;
+	}
+	//otherwise, add to the end of the queue
+	else
+	{
+		sem->last->next = new;
+		sem->last = new; 
+	}
+}
+
+//dequeue helper method
+struct sem_queue_node *sem_dequeue(struct cs1550_sem *sem)
+{
+	struct sem_queue_node *deq;
+	deq = sem->first;
+	
+	//This will never be called when the queue is empty so i'm not checking if first == NULL
+	//last item in the queue has been popped, set first and last to null
+	if(sem->first == sem->last)
+	{
+		sem->first = NULL;
+		sem->last = NULL;
+	}
+	//otherwise, remove the first item in the queue
+	else sem->first = sem->first->next;
+	return deq;
+}
+
+asmlinkage long sys_cs1550_down(struct cs1550_sem *sem)
+{
+	spin_lock(&sem_lock); //begin critical region
+	sem->value -= 1;
+	// if semaphore value < 0, enqueue current process and 
+	if(sem->value < 0) 
+	{
+		sem_enqueue(current, sem);
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_unlock(&sem_lock); //exit critical region
+		schedule(); //call the scheduler
+	}
+	//blocking wasn't neccesary other than updating value, unblock
+	else spin_unlock(&sem_lock);
+	return 0;
+}
+
+asmlinkage long sys_cs1550_up(struct cs1550_sem *sem)
+{
+	spin_lock(&sem_lock);
+	sem->value += 1;
+	//if semaphore value <= 0 remove process from queue and wake it
+	if (sem->value <= 0)
+	{
+			//dequeues the first process waiting
+			struct sem_queue_node *deq;
+			deq = sem_dequeue(sem);
+			
+			//wakes the dequeued process
+			wake_up_process(deq->task);
+			
+			kfree(deq);
+			
+			//exit critical region
+			spin_unlock(&sem_lock);
+	}
+	//blocking wasn't neccesary other than updating value, unblock
+	else spin_unlock(&sem_lock);
+	
+	return 0;
+}
 
